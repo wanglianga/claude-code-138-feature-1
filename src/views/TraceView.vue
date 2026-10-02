@@ -49,8 +49,28 @@ const actualDuration = computed(() => {
 })
 
 const guideChanges = computed(() =>
-  r.value?.timeline.filter((e) => e.kind === 'guide_swap' || e.kind === 'guide_assign') ?? [],
+  r.value?.timeline.filter((e) => e.kind === 'guide_swap' || e.kind === 'guide_assign' || e.kind === 'guide_release') ?? [],
 )
+
+/** 最近一次迟到重排（优先展示联系人已确认的） */
+const latePlan = computed(() => {
+  const list = r.value?.latePlans
+  if (!list?.length) return undefined
+  return [...list].reverse().find((p) => p.confirmed) ?? list[list.length - 1]
+})
+const confirmedOption = computed(() =>
+  latePlan.value?.confirmed
+    ? latePlan.value.options.find((o) => o.type === latePlan.value!.confirmed!.type)
+    : undefined,
+)
+/** 投诉是否涉及讲解内容/时长减少 */
+const complaintAboutReduction = computed(() =>
+  !!r.value?.complaint && /缩水|减少|缩短|压缩|时长|少了|没讲完|内容/.test(r.value.complaint),
+)
+const hallName = (id: string) => museum.hallById(id)?.name.replace(/^.*? · /, '') ?? id
+const ACTION_LABEL: Record<string, string> = {
+  keep: '保留讲解', trim: '压缩时长', drop: '放弃讲解', self: '自助参观', done: '已完成',
+}
 
 function submitComplaint() {
   if (!newComplaint.value.trim()) return
@@ -136,6 +156,57 @@ const deviceRows = computed(() => r.value?.devices ?? [])
         </div>
       </div>
 
+      <!-- 迟到重排与压缩依据 -->
+      <div v-if="latePlan" class="card" :style="complaintAboutReduction ? 'border-color:var(--red)' : ''">
+        <div class="card-title">
+          团体迟到路线重排与压缩依据
+          <span class="aside">联系人确认留痕 · 投诉时直接回放，不依赖人工解释</span>
+        </div>
+        <div v-if="complaintAboutReduction" class="callout danger" style="margin-top:0">
+          本团投诉涉及讲解内容/时长减少，以下为当日迟到重排的客观依据与各厅压缩明细，可直接据此答复。
+        </div>
+        <dl class="kv" style="margin-bottom:10px">
+          <dt>迟到时长</dt><dd>{{ latePlan.lateMin }} 分钟（生成于 {{ latePlan.createdAt.slice(11, 16) }}）</dd>
+          <dt>讲解员离场截止</dt><dd><strong>{{ latePlan.basis.guideDeadlineHM }}</strong> —— {{ latePlan.basis.guideDeadlineReason }}</dd>
+          <dt>剩余可讲解 / 原计划剩余</dt><dd>{{ latePlan.basis.remainingGuideMin }} / {{ latePlan.basis.plannedRemainingMin }} 分钟，压缩 {{ latePlan.basis.mustCutMin }} 分钟</dd>
+          <dt>下一团到馆</dt><dd>{{ latePlan.basis.nextGroupHM ? `${latePlan.basis.nextGroupHM} · 「${latePlan.basis.nextGroupName}」` : '当日无后续带团任务' }}</dd>
+          <dt>联系人确认</dt>
+          <dd>
+            <template v-if="latePlan.confirmed">
+              <strong>{{ latePlan.confirmed.by }}</strong> 于 {{ latePlan.confirmed.at.slice(11, 16) }} 确认「{{ latePlan.confirmed.optionTitle }}」
+            </template>
+            <template v-else><span class="tag tag-warn">尚未确认</span></template>
+          </dd>
+        </dl>
+        <table class="data">
+          <thead><tr><th>展厅</th><th>处置</th><th>原计划</th><th>重排后</th><th>压缩依据</th></tr></thead>
+          <tbody>
+            <tr v-for="d in confirmedOption?.decisions ?? []" :key="d.hallId">
+              <td class="small"><strong>{{ hallName(d.hallId) }}</strong></td>
+              <td class="small">
+                <span class="tag" :class="d.action === 'keep' ? 'tag-ok' : d.action === 'self' ? 'tag-acc' : d.action === 'trim' ? 'tag-warn' : 'tag-maint'">
+                  {{ ACTION_LABEL[d.action] }}
+                </span>
+              </td>
+              <td class="small mono">{{ d.originalEnter }}~{{ d.originalLeave }}（{{ d.originalMin }} 分钟）</td>
+              <td class="small mono">
+                <template v-if="d.newEnter && d.newLeave && d.action !== 'drop'">{{ d.newEnter }}~{{ d.newLeave }}（{{ d.newMin }} 分钟）</template>
+                <template v-else>—</template>
+              </td>
+              <td class="small muted">{{ d.reasons.join('；') }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-if="confirmedOption?.type === 'selfguide'" class="callout info" style="margin-bottom:0; margin-top:10px">
+          📟 已推送 {{ confirmedOption.audioGuide?.name }}；{{ confirmedOption.audioGuide?.pickup }}<br />
+          🚩 集合点：{{ confirmedOption.assemblyPoint }}
+        </div>
+        <div v-else-if="confirmedOption?.type === 'reschedule'" class="callout info" style="margin-bottom:0; margin-top:10px">
+          已改签：{{ confirmedOption.rescheduleArriveHM }} 重新到馆、{{ confirmedOption.rescheduleStartHM }} 开讲，
+          由 {{ confirmedOption.rescheduleGuides?.map((g) => g.name).join('、') }} 带团，未产生讲解缩水。
+        </div>
+      </div>
+
       <!-- 分流决策 & 讲解员 -->
       <div class="grid grid-2" style="align-items:start">
         <div class="card">
@@ -178,11 +249,12 @@ const deviceRows = computed(() => r.value?.devices ?? [])
             </div>
             <div v-if="!deviceRows.length" class="empty small">未借用耳麦</div>
             <table v-else class="data">
-              <thead><tr><th>编号</th><th>借出</th><th>归还</th><th>状态</th><th>扣款</th></tr></thead>
+              <thead><tr><th>编号</th><th>借出</th><th>应还截止</th><th>归还</th><th>状态</th><th>扣款</th></tr></thead>
               <tbody>
                 <tr v-for="d in deviceRows" :key="d.code">
                   <td class="mono small">{{ d.code }}</td>
                   <td class="small mono">{{ d.lentAt?.slice(11, 16) }}</td>
+                  <td class="small mono">{{ d.dueBackAt?.slice(11, 16) ?? '—' }}</td>
                   <td class="small mono">{{ d.returnedAt?.slice(11, 16) ?? '—' }}</td>
                   <td class="small">
                     <span class="tag" :class="{ 'tag-ok': d.status === 'returned', 'tag-maint': d.status === 'damaged' || d.status === 'lost', 'tag-warn': d.status === 'lent' }">

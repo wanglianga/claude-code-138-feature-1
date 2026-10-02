@@ -131,4 +131,82 @@ describe('预约全生命周期集成', () => {
     expect(stop.state).toBe('maintenance')
     expect(museum.maintenance.h5?.reason).toBe('光影设备抢修')
   })
+
+  it('团体迟到 40 分钟：缩短路线——联系人确认后压缩到讲解员交接前、耳麦截止随之前移', () => {
+    const museum = useMuseumStore()
+    const store = useReservationsStore()
+    museum.setNow('10:25')
+    const r3 = store.byId('R20261001-03')!
+    const plan = store.generateLatePlan(r3.id, 40)!
+    expect(plan.basis.guideDeadlineHM).toBe('11:20')
+    expect(plan.basis.mustCutMin).toBeGreaterThan(0)
+
+    store.confirmLatePlan(r3.id, plan.id, 'shorten', '孙老师')
+    const after = store.byId(r3.id)!
+    // 联系人确认留痕
+    expect(after.latePlans[0].confirmed?.by).toBe('孙老师')
+    expect(after.latePlans[0].confirmed?.type).toBe('shorten')
+    // 所有未完成站点不晚于讲解员 11:20 交接
+    const last = after.route.filter((s) => s.state !== 'skipped' && s.state !== 'maintenance').slice(-1)[0]
+    expect(last.plannedLeave <= '11:20').toBe(true)
+    // 各厅时长被压缩（h3 23→16 等）
+    expect(after.route.find((s) => s.hallId === 'h3')!.durationMin).toBeLessThan(23)
+    expect(after.route.some((s) => s.note?.includes('迟到压缩'))).toBe(true)
+    // 讲解员仍带本团，耳麦借用截止时间随新结束时间调整
+    expect(after.assignedGuideIds).toContain('g3')
+    expect(after.devices[0].dueBackAt).toBe('2026-10-01T11:20:00')
+    // 时间线含生成方案与执行缩短
+    expect(after.timeline.some((e) => e.kind === 'late' && e.title.includes('路线重排方案'))).toBe(true)
+    expect(after.timeline.some((e) => e.kind === 'shorten_route')).toBe(true)
+  })
+
+  it('团体迟到：改自助参观——推送导览/集合点、释放苏晓并自动派给等待团 R06、耳麦截止调整', () => {
+    const museum = useMuseumStore()
+    const store = useReservationsStore()
+    museum.setNow('10:25')
+    const r3 = store.byId('R20261001-03')!
+    const plan = store.generateLatePlan(r3.id, 40)!
+    store.confirmLatePlan(r3.id, plan.id, 'selfguide', '孙老师')
+
+    const after = store.byId(r3.id)!
+    expect(after.visitMode).toBe('selfguided')
+    expect(after.route.every((s) => s.state === 'selfguided' || s.state === 'done')).toBe(true)
+    // 讲解员释放
+    expect(after.assignedGuideIds).not.toContain('g3')
+    // 释放时段自动派给后续等待团 R06
+    const r06 = store.byId('R20261001-06')!
+    expect(r06.assignedGuideIds).toContain('g3')
+    expect(r06.timeline.some((e) => e.kind === 'guide_assign' && e.title.includes('接续派工'))).toBe(true)
+    // 耳麦继续借用、截止随集合点（投影后 11:40）
+    expect(after.devices.every((d) => d.status === 'lent' && d.dueBackAt === '2026-10-01T11:40:00')).toBe(true)
+    // 自助与释放留痕
+    expect(after.timeline.some((e) => e.kind === 'self_guide' && e.detail?.includes('云川导览') && e.detail?.includes('集合点'))).toBe(true)
+    expect(after.timeline.some((e) => e.kind === 'guide_release')).toBe(true)
+  })
+
+  it('团体迟到：改签——平移路线到新时段、改派何田田、苏晓释放给 R06、耳麦随改签平移', () => {
+    const museum = useMuseumStore()
+    const store = useReservationsStore()
+    museum.setNow('10:25')
+    const r3 = store.byId('R20261001-03')!
+    const plan = store.generateLatePlan(r3.id, 40)!
+    const rs = plan.options.find((o) => o.type === 'reschedule')!
+    expect(rs.feasible).toBe(true)
+    store.confirmLatePlan(r3.id, plan.id, 'reschedule', '孙老师')
+
+    const after = store.byId(r3.id)!
+    expect(after.status).toBe('confirmed')
+    expect(after.assignedGuideIds).toContain('g5')
+    expect(after.assignedGuideIds).not.toContain('g3')
+    // 站点平移到 13:10 开讲、按完整时长
+    const first = after.route.find((s) => s.state === 'planned')!
+    expect(first.plannedEnter).toBe(rs.rescheduleStartHM)
+    expect(first.durationMin).toBe(23)
+    // 苏晓释放派给等待团
+    expect(store.byId('R20261001-06')!.assignedGuideIds).toContain('g3')
+    // 耳麦截止随改签结束时间
+    expect(after.devices[0].dueBackAt).toBe(`2026-10-01T${rs.endHM}:00`)
+    expect(after.timeline.some((e) => e.kind === 'reschedule')).toBe(true)
+    expect(after.timeline.some((e) => e.kind === 'guide_assign' && e.title.includes('何田田'))).toBe(true)
+  })
 })

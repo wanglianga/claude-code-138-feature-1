@@ -51,8 +51,8 @@ export interface RouteStop {
   durationMin: number
   actualEnter?: string
   actualLeave?: string
-  /** planned 待参观 / current 正在参观 / done 已完成 / skipped 跳过 / maintenance 临时维护 / congested 拥堵避让 */
-  state: 'planned' | 'current' | 'done' | 'skipped' | 'maintenance' | 'congested'
+  /** planned 待参观 / current 正在参观 / done 已完成 / skipped 跳过 / maintenance 临时维护 / congested 拥堵避让 / selfguided 自助参观（无讲解员） */
+  state: 'planned' | 'current' | 'done' | 'skipped' | 'maintenance' | 'congested' | 'selfguided'
   note?: string
 }
 
@@ -67,10 +67,14 @@ export type EventKind =
   | 'device_exchange'
   | 'guide_assign'
   | 'guide_swap'
+  | 'guide_release'
   | 'batch_admit'
   | 'start_tour'
   | 'hall_congestion'
   | 'late'
+  | 'shorten_route'
+  | 'self_guide'
+  | 'reschedule'
   | 'child_lost'
   | 'device_broken'
   | 'reroute'
@@ -110,7 +114,87 @@ export interface DeviceUnit {
   lentAt?: string
   returnedAt?: string
   damageFee?: number // 损坏/遗失扣款
+  /** 自助参观/迟到重排后调整的耳麦应归还截止时间（ISO） */
+  dueBackAt?: string
   note?: string
+}
+
+/** 迟到重排：单个展厅的压缩/保留/改自助依据 */
+export interface LateStopDecision {
+  hallId: string
+  /** keep 保留讲解 / trim 压缩时长 / drop 放弃讲解（改自助或跳过） / self 自助参观 / done 已完成 */
+  action: 'keep' | 'trim' | 'drop' | 'self' | 'done'
+  originalEnter: string
+  originalLeave: string
+  newEnter?: string
+  newLeave?: string
+  originalMin: number
+  newMin: number
+  /** 该厅压缩/放弃的量化依据 */
+  reasons: string[]
+}
+
+/** 生成方案时的客观依据（剩余讲解时长 / 拥堵 / 下一团到馆 / 讲解员截止） */
+export interface LatePlanBasis {
+  lateMin: number
+  /** 原定讲解员最迟必须离场的分钟数与原因（下班或下一团交接） */
+  guideDeadlineHM: string
+  guideDeadlineReason: string
+  /** 从当前时刻到讲解员截止，可用于讲解的分钟数 */
+  remainingGuideMin: number
+  /** 原计划剩余讲解分钟数（未完成站点） */
+  plannedRemainingMin: number
+  /** 下一团到馆时间与团体名 */
+  nextGroupHM?: string
+  nextGroupName?: string
+  /** 受影响（未完成）站点在当前时刻的实时满载率 */
+  hallRatios: { hallId: string; ratio: number }[]
+  /** 综合判定：必须压缩的分钟数 */
+  mustCutMin: number
+}
+
+export type LatePlanType = 'shorten' | 'selfguide' | 'reschedule'
+
+export interface LatePlanOption {
+  type: LatePlanType
+  title: string
+  /** 该方案当前是否可行（不可行时置灰并说明原因，如当日已无可改签时段） */
+  feasible: boolean
+  /** 推荐分，越高越推荐；前端按此排序并标记「推荐」 */
+  score: number
+  recommend?: boolean
+  /** 讲解员讲解结束时间 */
+  endHM: string
+  /** 缩短/自助方案保留的讲解分钟数（改签为 0，尚未开始） */
+  guidedMin: number
+  /** 相比原计划压缩的讲解分钟数 */
+  cutMin: number
+  decisions: LateStopDecision[]
+  /** 改签方案的建议到馆/开讲时间 */
+  rescheduleArriveHM?: string
+  rescheduleStartHM?: string
+  rescheduleGuides?: { id: string; name: string }[]
+  /** 方案级说明 */
+  summary: string
+  reasons: string[]
+  /** 自助参观：电子导览与集合点 */
+  audioGuide?: { name: string; pickup: string }
+  assemblyPoint?: string
+}
+
+/** 一次迟到重排的完整记录（生成依据 + 三方案 + 联系人确认结果） */
+export interface LatePlan {
+  id: string
+  createdAt: string
+  lateMin: number
+  basis: LatePlanBasis
+  options: LatePlanOption[]
+  confirmed?: {
+    type: LatePlanType
+    optionTitle: string
+    by: string // 确认的联系人
+    at: string
+  }
 }
 
 export interface Reservation {
@@ -147,6 +231,10 @@ export interface Reservation {
   // —— 路线与时长 ——
   route: RouteStop[]
   durationMin: number
+  /** guided 讲解员带团（默认）/ selfguided 联系人确认后改为自助参观 */
+  visitMode: 'guided' | 'selfguided'
+  /** 团体迟到后的路线重排记录（含压缩依据与联系人确认结果） */
+  latePlans: LatePlan[]
 
   // —— 设备与押金 ——
   devices: DeviceUnit[]

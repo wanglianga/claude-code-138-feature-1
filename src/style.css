@@ -247,6 +247,7 @@ table.data tr.clickable:hover td { background: rgba(201,178,128,0.08); }
 .route-stop.state-current { border-color: var(--gold); box-shadow: 0 0 0 3px rgba(201,178,128,0.22); }
 .route-stop.state-congested { border-color: var(--amber); background: var(--amber-soft); }
 .route-stop.state-maintenance { border-color: var(--red); background: var(--red-soft); }
+.route-stop.state-selfguided { border-color: var(--purple); background: var(--purple-soft); }
 .route-stop.state-skipped { opacity: 0.55; }
 .route-arrow { display: flex; align-items: center; padding: 0 6px; color: var(--ink-3); }
 .rs-time { font-size: 11.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; }

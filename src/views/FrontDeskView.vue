@@ -6,6 +6,7 @@ import { useReservationsStore } from '@/stores/reservations'
 import { useSessionStore } from '@/stores/session'
 import { hmOfISO, toMin } from '@/lib/time'
 import StatusBadge from '@/components/StatusBadge.vue'
+import LatePlanPanel from '@/components/LatePlanPanel.vue'
 
 const store = useReservationsStore()
 const museum = useMuseumStore()
@@ -37,6 +38,12 @@ const lateMin = computed(() => {
   return toMin(hmOfISO(r.value.actualArrive)) - toMin(hmOfISO(r.value.arriveTime))
 })
 
+/** 按当前馆内时钟相对预约到馆的迟到分钟（团尚未登记到馆也可提前启动重排） */
+const clockLateMin = computed(() => {
+  if (!r.value) return 0
+  return Math.max(0, toMin(museum.nowHM) - toMin(hmOfISO(r.value.arriveTime)))
+})
+
 function arrive() {
   store.markArrived(selectedId.value)
 }
@@ -52,6 +59,9 @@ function admit() {
 }
 
 const availableStock = computed(() => museum.inventory.available)
+
+// 严重迟到路线重排（已到馆/已确认但尚未入馆即可处置）
+const lateOpen = ref(false)
 </script>
 
 <template>
@@ -87,11 +97,20 @@ const availableStock = computed(() => museum.inventory.available)
           <div><div class="stat-label">耳麦库存（在库）</div><div class="stat-num">{{ availableStock }}</div></div>
           <div><div class="stat-label">预约到馆</div><div class="stat-num" style="font-size:22px">{{ hmOfISO(r.arriveTime) }}</div></div>
         </div>
-        <div v-if="lateMin !== null && lateMin !== 0"
-             class="callout" :class="lateMin > 10 ? 'danger' : 'info'" style="margin-top:12px; margin-bottom:0">
-          团队{{ lateMin > 0 ? `迟到 ${lateMin} 分钟` : `早到 ${-lateMin} 分钟` }}，
-          {{ lateMin > 10 ? '需顺延后续展厅计划并评估对其他团队的影响（在分流调度页操作）。' : '可按原计划入馆。' }}
+        <div v-if="(lateMin !== null && lateMin !== 0) || clockLateMin >= 20"
+             class="callout" :class="(lateMin ?? clockLateMin) > 10 ? 'danger' : 'info'" style="margin-top:12px; margin-bottom:0">
+          <template v-if="lateMin !== null && lateMin !== 0">
+            团队{{ lateMin > 0 ? `迟到 ${lateMin} 分钟` : `早到 ${-lateMin} 分钟` }}，
+            {{ lateMin > 10 ? '原定讲解员后续可能还有带团任务，可立即启动路线重排（缩短/自助/改签），联系人确认后联动耳麦与排班。' : '可按原计划入馆。' }}
+          </template>
+          <template v-else>
+            按当前时钟该团已迟到约 {{ clockLateMin }} 分钟（尚未登记到馆），可先按现场情况预演重排方案。
+          </template>
+          <div v-if="(lateMin ?? clockLateMin) >= 20" style="margin-top:8px">
+            <button class="btn-sm btn-gold" @click="lateOpen = true">⏱ 启动团体迟到路线重排</button>
+          </div>
         </div>
+        <LatePlanPanel v-if="lateOpen" v-model:open="lateOpen" :res-id="selectedId" />
       </div>
 
       <div class="grid grid-3" style="align-items:start">

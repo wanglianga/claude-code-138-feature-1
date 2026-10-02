@@ -12,6 +12,7 @@ const STATE_LABEL: Record<string, string> = {
   skipped: '已跳过',
   maintenance: '临时维护',
   congested: '拥堵避让',
+  selfguided: '自助参观',
 }
 </script>
 
@@ -29,7 +30,7 @@ const STATE_LABEL: Record<string, string> = {
         </div>
         <div class="rs-name">{{ museum.hallById(s.hallId)?.name ?? s.hallId }}</div>
         <div class="rs-note">
-          <span class="tag" :class="s.state === 'done' ? 'tag-ok' : s.state === 'maintenance' ? 'tag-maint' : s.state === 'congested' ? 'tag-warn' : ''">
+          <span class="tag" :class="s.state === 'done' ? 'tag-ok' : s.state === 'maintenance' ? 'tag-maint' : s.state === 'congested' ? 'tag-warn' : s.state === 'selfguided' ? 'tag-acc' : ''">
             {{ STATE_LABEL[s.state] }}
           </span>
           <span v-if="!compact && s.note" style="margin-left:4px">{{ s.note }}</span>

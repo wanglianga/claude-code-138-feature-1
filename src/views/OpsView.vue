@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { useMuseumStore } from '@/stores/museum'
 import { useReservationsStore } from '@/stores/reservations'
-import { guideBusyWindows, hallLoadAt, occupancyGrid } from '@/lib/schedule'
+import { availableGuides, guideBusyWindows, hallLoadAt, occupancyGrid } from '@/lib/schedule'
 import { hmOfISO, toMin } from '@/lib/time'
 import CapacityBar from '@/components/CapacityBar.vue'
 import HallTags from '@/components/HallTags.vue'
@@ -59,6 +59,27 @@ const damagedDevices = computed(() =>
 )
 const largeGroups = computed(() => todayList.value.filter((r) => r.groupSize >= 35))
 const overCapHalls = computed(() => hallRows.value.filter((x) => x.ratio >= 0.85))
+
+// 讲解员未配齐的等待团队 + 当前可接续讲解员（自助/改签释放后自动派工的可视化依据）
+const waitingTeams = computed(() =>
+  todayList.value
+    .filter((r) => ['confirmed', 'arrived'].includes(r.status))
+    .map((r) => {
+      const need = Math.ceil((r.verifiedSize ?? r.groupSize) / 25)
+      const active = r.route.filter((s) => s.state !== 'skipped' && s.state !== 'maintenance')
+      const start = active[0]?.plannedEnter
+      const end = active[active.length - 1]?.plannedLeave
+      return { r, need, short: Math.max(0, need - r.assignedGuideIds.length), start, end }
+    })
+    .filter((x) => x.short > 0)
+    .sort((a, b) => (a.start ?? '').localeCompare(b.start ?? '')),
+)
+const guideCandidatesFor = (team: (typeof waitingTeams.value)[number]) =>
+  availableGuides(
+    museum.guides,
+    todayList.value,
+    { language: team.r.language, themeId: team.r.themeId, startHM: team.start ?? museum.nowHM, endHM: team.end ?? museum.nowHM },
+  ).filter((g) => g.ok && !team.r.assignedGuideIds.includes(g.id))
 
 // 优化建议
 const suggestions = computed(() => {
@@ -139,6 +160,34 @@ const suggestions = computed(() => {
       </div>
       <div class="hint" style="margin-top:8px">点击「途中分流调度」可处理讲解员临时替换；替换记录会写入团体档案，投诉时可直接回放。</div>
     </div>
+  </div>
+
+  <!-- 等待团队讲解员派工 -->
+  <div class="card" style="margin-bottom:14px" v-if="waitingTeams.length">
+    <div class="card-title">
+      讲解员未配齐的等待团队
+      <span class="aside">团体迟到改自助/改签释放讲解员后，系统自动把其时段派给这里最早可接续的团队</span>
+    </div>
+    <table class="data">
+      <thead><tr><th>团队</th><th>计划开讲</th><th>需讲解员</th><th>已派</th><th>当前可接续讲解员</th></tr></thead>
+      <tbody>
+        <tr v-for="t in waitingTeams" :key="t.r.id">
+          <td><strong style="font-size:13px">{{ t.r.orgName }}</strong><div class="small muted">{{ t.r.verifiedSize ?? t.r.groupSize }} 人</div></td>
+          <td class="mono">{{ t.start }} ~ {{ t.end }}</td>
+          <td>{{ t.need }} 名</td>
+          <td>
+            <span v-if="t.r.assignedGuideIds.length">{{ t.r.assignedGuideIds.map((g) => museum.guideById(g)?.name).join('、') }}</span>
+            <span v-else class="tag tag-warn">待派</span>
+          </td>
+          <td>
+            <span v-if="guideCandidatesFor(t).length">
+              <span v-for="g in guideCandidatesFor(t)" :key="g.id" class="tag tag-ok" style="margin-right:4px">{{ g.name }}</span>
+            </span>
+            <span v-else class="small muted">暂无空闲讲解员</span>
+          </td>
+        </tr>
+      </tbody>
+    </table>
   </div>
 
   <!-- 优化建议 + 今日团队流 -->

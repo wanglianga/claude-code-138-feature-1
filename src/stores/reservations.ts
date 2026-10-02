@@ -1,18 +1,24 @@
 import { defineStore } from 'pinia'
-import { DAMAGE_FEE, LOST_FEE } from '@/data/museum'
+import { DAMAGE_FEE, LOST_FEE, TODAY } from '@/data/museum'
 import { seedReservations } from '@/data/seed'
 import {
+  buildLatePlan,
   buildRoute,
+  occupancyGrid,
   plannedDuration,
+  releasableGuideTargets,
 } from '@/lib/schedule'
-import { addHM, hmOfISO, toMin, uid } from '@/lib/time'
+import { addHM, hmOfISO, toHM, toMin, uid } from '@/lib/time'
 import { useMuseumStore } from './museum'
 import type {
   AgeBand,
   EventKind,
   GroupType,
+  Guide,
   HallClosure,
   Language,
+  LatePlan,
+  LatePlanOption,
   Reservation,
   ReservationStatus,
   RouteStop,
@@ -81,6 +87,8 @@ export const useReservationsStore = defineStore('reservations', {
         assignedGuideIds: [],
         route,
         durationMin: plannedDuration(route),
+        visitMode: 'guided',
+        latePlans: [],
         devices: [],
         depositTotal: 0,
         depositDeduction: 0,
@@ -247,6 +255,227 @@ export const useReservationsStore = defineStore('reservations', {
       if (resolved && pauseMin > 0) {
         this.delay(id, pauseMin, 'wait', `等待走散儿童归队（${pauseMin} 分钟）`, '', by)
       }
+    },
+
+    // ---------- 团体迟到后的路线重排 ----------
+    /** 依据 剩余讲解时长 / 展厅拥堵 / 下一团到馆 生成缩短/自助/改签三方案 */
+    generateLatePlan(id: string, lateMin: number): LatePlan | null {
+      const r = this.byId(id)
+      const museum = useMuseumStore()
+      if (!r) return null
+      const grid = occupancyGrid(this.list, {
+        maintenance: museum.maintenance,
+        extraLoad: museum.extraLoad,
+      })
+      const plan = buildLatePlan(r, museum.guides, museum.halls, this.list, grid, {
+        maintenance: museum.maintenance,
+        extraLoad: museum.extraLoad,
+      }, { lateMin, nowHM: museum.nowHM })
+      r.latePlans.push(plan)
+      const b = plan.basis
+      this.log(
+        r,
+        'late',
+        `团体迟到 ${lateMin} 分钟，生成路线重排方案`,
+        museum.nowISO,
+        '系统',
+        {
+          detail:
+            `原定讲解员最迟 ${b.guideDeadlineHM} 离场（${b.guideDeadlineReason}）；剩余可讲解 ${b.remainingGuideMin} 分钟、` +
+            `原计划剩余 ${b.plannedRemainingMin} 分钟，需压缩 ${b.mustCutMin} 分钟` +
+            `${b.nextGroupName ? `；下一团「${b.nextGroupName}」${b.nextGroupHM} 到馆` : ''}。`,
+        },
+      )
+      return plan
+    },
+
+    /** 联系人确认某一方案后执行，联动路线、耳麦借用时间与讲解员排班 */
+    confirmLatePlan(id: string, planId: string, type: LatePlanOption['type'], by: string) {
+      const r = this.byId(id)
+      const museum = useMuseumStore()
+      if (!r) return
+      const plan = r.latePlans.find((p) => p.id === planId)
+      const option = plan?.options.find((o) => o.type === type && o.feasible)
+      if (!plan || !option) return
+      plan.confirmed = { type, optionTitle: option.title, by, at: museum.nowISO }
+      this.log(r, 'late', `联系人 ${by} 确认：${option.title}`, museum.nowISO, by, { detail: option.summary })
+      if (type === 'shorten') this.applyShortenRoute(r, option, by)
+      else if (type === 'selfguide') this.applySelfGuide(r, option, by)
+      else this.applyReschedule(r, plan, option, by)
+    },
+
+    /** 方案一：缩短讲解路线 */
+    applyShortenRoute(r: Reservation, option: LatePlanOption, by: string) {
+      const museum = useMuseumStore()
+      const droppedNames: string[] = []
+      for (const d of option.decisions) {
+        const stop = r.route.find(
+          (s) => s.hallId === d.hallId && ['current', 'planned', 'congested'].includes(s.state),
+        )
+        if (!stop) continue
+        if (d.action === 'drop') {
+          stop.state = 'skipped'
+          stop.durationMin = 0
+          stop.note = `迟到压缩：放弃人工讲解（${d.reasons.join('；')}），团队可快速自行观看`
+          droppedNames.push(museum.hallById(d.hallId)?.name ?? d.hallId)
+        } else {
+          stop.plannedEnter = d.newEnter!
+          stop.plannedLeave = d.newLeave!
+          stop.durationMin = d.newMin
+          if (stop.state === 'congested') stop.state = 'planned'
+          stop.note = `迟到压缩为 ${d.newMin} 分钟：${d.reasons.join('；')}`
+        }
+      }
+      this.refreshDuration(r)
+      this.adjustHeadsetDue(r, option.endHM)
+      this.log(
+        r,
+        'shorten_route',
+        `执行缩短路线：保留人工讲解至 ${option.endHM}，压缩 ${option.cutMin} 分钟`,
+        museum.nowISO,
+        by,
+        {
+          detail:
+            `${option.summary}${droppedNames.length ? `；放弃讲解的展厅：${droppedNames.join('、')}` : ''} ` +
+            '耳麦借用截止时间与讲解员排班已按新结束时间调整。',
+        },
+      )
+    },
+
+    /** 方案二：改为自助参观，释放讲解员并派给后续等待团队 */
+    applySelfGuide(r: Reservation, option: LatePlanOption, by: string) {
+      const museum = useMuseumStore()
+      r.visitMode = 'selfguided'
+      for (const d of option.decisions) {
+        const stop = r.route.find(
+          (s) => s.hallId === d.hallId && ['current', 'planned', 'congested'].includes(s.state),
+        )
+        if (!stop) continue
+        stop.state = 'selfguided'
+        stop.actualEnter = undefined
+        stop.actualLeave = undefined
+        stop.plannedEnter = d.newEnter ?? stop.plannedEnter
+        stop.plannedLeave = d.newLeave ?? stop.plannedLeave
+        stop.note = `联系人确认改为自助参观：电子导览覆盖，${option.assemblyPoint ?? ''}`
+      }
+      this.refreshDuration(r)
+      this.adjustHeadset(r, option.endHM)
+      const released = [...r.assignedGuideIds]
+      r.assignedGuideIds = []
+      const reassigns: { guideId: string; targetId: string; targetName: string }[] = []
+      for (const guideId of released) {
+        const guide = museum.guideById(guideId)
+        const target = this.releaseGuideToWaiting(r, guideId, by)
+        if (guide) {
+          this.log(r, 'guide_release', `讲解员 ${guide.name} 随自助参观释放`, museum.nowISO, by, {
+            detail: target
+              ? `释放时段已派给后续等待团队「${target.orgName}」（计划 ${target.route.find((s) => s.state !== 'skipped' && s.state !== 'maintenance')?.plannedEnter} 开讲）。`
+              : '当前无匹配的等待团队，转为机动待命。',
+          })
+        }
+        if (target) reassigns.push({ guideId, targetId: target.id, targetName: target.orgName })
+      }
+      this.log(r, 'self_guide', `改为自助参观：推送电子导览与集合点`, museum.nowISO, by, {
+        detail:
+          `已向联系人 ${r.contactName} 推送${option.audioGuide?.name ?? '电子导览'}（${option.audioGuide?.pickup ?? ''}）；` +
+          `集合点：${option.assemblyPoint}。耳麦继续借用、归还截止调整为 ${option.endHM}。` +
+          (reassigns.length
+            ? ` 释放的讲解员已派给：${reassigns.map((x) => `${museum.guideById(x.guideId)?.name}→「${x.targetName}」`).join('；')}。`
+            : ' 释放的讲解员当前无匹配等待团，转入机动待命。'),
+      })
+    },
+
+    /** 方案三：改签新时段：本站等待改期，原讲解员释放、为新时段指派讲解员 */
+    applyReschedule(r: Reservation, plan: LatePlan, option: LatePlanOption, by: string) {
+      const museum = useMuseumStore()
+      const newGuideIds = (option.rescheduleGuides ?? []).map((g) => g.id)
+      // 未完成站点平移到新时段
+      let cursor = toMin(option.rescheduleStartHM!)
+      for (const d of option.decisions) {
+        const stop = r.route.find(
+          (s) => s.hallId === d.hallId && ['current', 'planned', 'congested'].includes(s.state),
+        )
+        if (!stop) continue
+        const enter = cursor
+        const leave = enter + d.originalMin
+        stop.state = 'planned'
+        stop.actualEnter = undefined
+        stop.actualLeave = undefined
+        stop.plannedEnter = toHM(enter)
+        stop.plannedLeave = toHM(leave)
+        stop.durationMin = d.originalMin
+        stop.note = `团体迟到 ${plan.lateMin} 分钟，改签至 ${option.rescheduleStartHM} 开讲，本站按完整时长参观`
+        cursor = leave + 5
+      }
+      this.refreshDuration(r)
+      this.adjustHeadset(r, option.endHM)
+      // 原讲解员（新时段不再由其带的）释放并派给等待团
+      const released = r.assignedGuideIds.filter((g) => !newGuideIds.includes(g))
+      const reassignNames: string[] = []
+      for (const guideId of released) {
+        const target = this.releaseGuideToWaiting(r, guideId, by)
+        const gname = museum.guideById(guideId)?.name ?? guideId
+        this.log(r, 'guide_release', `讲解员 ${gname} 的原带团时段随改签释放`, museum.nowISO, by, {
+          detail: target ? `已改派给等待团队「${target.orgName}」。` : '转为机动待命。',
+        })
+        if (target) reassignNames.push(`${gname}→「${target.orgName}」`)
+      }
+      r.assignedGuideIds = newGuideIds.length
+        ? newGuideIds
+        : r.assignedGuideIds.filter((g) => !released.includes(g))
+      for (const g of option.rescheduleGuides ?? []) {
+        this.log(r, 'guide_assign', `改签新时段讲解员就位：${g.name}`, museum.nowISO, g.name, {
+          detail: `${option.rescheduleStartHM} 开讲，语言/主题/排班与容量均已校验。`,
+        })
+      }
+      r.status = 'confirmed'
+      this.log(
+        r,
+        'reschedule',
+        `团体改签：${option.rescheduleArriveHM} 重新到馆，${option.rescheduleStartHM} 开讲`,
+        museum.nowISO,
+        by,
+        {
+          detail:
+            `${option.summary} 耳麦借用随改签平移、归还截止 ${option.endHM}。` +
+            (reassignNames.length ? ` 原讲解员释放派工：${reassignNames.join('；')}。` : ''),
+        },
+      )
+    },
+
+    /** 把某讲解员从本团释放并自动派给最匹配的后续等待团队，返回被派给的预约 */
+    releaseGuideToWaiting(r: Reservation, guideId: string, by: string): Reservation | null {
+      const museum = useMuseumStore()
+      const guide: Guide | undefined = museum.guideById(guideId)
+      if (!guide) return null
+      const match = releasableGuideTargets(guide, this.list, museum.nowHM, r.id).find(
+        (m) => m.reservation.id !== r.id,
+      )
+      if (!match) return null
+      if (!match.reservation.assignedGuideIds.includes(guideId)) {
+        match.reservation.assignedGuideIds.push(guideId)
+      }
+      this.log(
+        match.reservation,
+        'guide_assign',
+        `讲解员 ${guide.name} 释放时段接续派工`,
+        museum.nowISO,
+        by,
+        { detail: `${match.reservation.orgName} 讲解员未配齐，${guide.name} 于 ${match.startHM} 接续带团。` },
+      )
+      return match.reservation
+    },
+
+    /** 自助/改签后调整耳麦借用截止时间 */
+    adjustHeadset(r: Reservation, dueHM: string) {
+      const dueISO = `${TODAY}T${dueHM}:00`
+      for (const d of r.devices) {
+        if (d.status === 'lent') d.dueBackAt = dueISO
+      }
+    },
+    /** 缩短路线后耳麦归还截止随新结束时间前移 */
+    adjustHeadsetDue(r: Reservation, dueHM: string) {
+      this.adjustHeadset(r, dueHM)
     },
 
     /** 展厅拥堵登记（只记录，改道在 applyReroute 中执行） */
@@ -448,7 +677,7 @@ export const useReservationsStore = defineStore('reservations', {
       r.satisfaction = satisfaction
       // 未关闭的站点统一收尾
       for (const s of r.route) {
-        if (s.state === 'current') {
+        if (s.state === 'current' || s.state === 'selfguided') {
           s.state = 'done'
           s.actualLeave = museum.nowHM
         } else if (s.state === 'planned') {
@@ -464,7 +693,18 @@ export const useReservationsStore = defineStore('reservations', {
       museum.resetAll()
       this.list = seedReservations()
     },
+
+    /** 兼容旧版本持久化数据：补齐迟到重排相关字段 */
+    migrate() {
+      for (const r of this.list) {
+        if (r.visitMode !== 'guided' && r.visitMode !== 'selfguided') r.visitMode = 'guided'
+        if (!Array.isArray(r.latePlans)) r.latePlans = []
+      }
+    },
   },
 
-  persist: { key: 'museum-reservations' },
+  persist: {
+    key: 'museum-reservations',
+    afterHydrate: (ctx) => (ctx.store as unknown as { migrate: () => void }).migrate(),
+  },
 })

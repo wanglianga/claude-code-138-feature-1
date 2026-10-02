@@ -80,11 +80,27 @@ describe('八大业务视图挂载冒烟', () => {
     const w = mountView(DispatchView)
     expect(w.text()).toContain('展厅实时态势')
     expect(w.text()).toContain('展厅拥堵分流')
+    expect(w.text()).toContain('团体迟到路线重排')
     expect(w.text()).toContain('儿童走散')
     expect(w.text()).toContain('耳麦损坏换机')
     expect(w.text()).toContain('讲解员临时替换')
     expect(w.text()).toContain('游客要求改路线')
     expect(w.text()).toContain('展厅临时维护')
+  })
+
+  it('迟到重排面板可生成缩短/自助/改签三方案并展示依据', async () => {
+    const w = mountView(DispatchView)
+    // 默认选中参观中的阳光路三小（迟到 40 分钟种子团）
+    expect(w.text()).toContain('阳光路第三小学')
+    await w.findAll('button').find((b) => b.text().includes('团体迟到路线重排'))!.trigger('click')
+    expect(w.text()).toContain('实际迟到分钟')
+    await w.findAll('button').find((b) => b.text().includes('生成方案'))!.trigger('click')
+    expect(w.text()).toContain('重排测算依据')
+    expect(w.text()).toContain('缩短讲解路线')
+    expect(w.text()).toContain('改为自助参观')
+    expect(w.text()).toContain('改签')
+    expect(w.text()).toContain('实验一小教育集团')
+    expect(w.text()).toContain('联系人确认')
   })
 
   it('离馆核销页渲染设备清点与押金结算', () => {

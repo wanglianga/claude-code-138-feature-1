@@ -14,6 +14,7 @@ import { addHM } from '@/lib/time'
 import HallTags from '@/components/HallTags.vue'
 import CapacityBar from '@/components/CapacityBar.vue'
 import RouteChain from '@/components/RouteChain.vue'
+import LatePlanPanel from '@/components/LatePlanPanel.vue'
 import type { HallClosure, RouteStop } from '@/types'
 
 const store = useReservationsStore()
@@ -37,6 +38,7 @@ const hallRows = computed(() =>
 
 type Mode = '' | 'congestion' | 'reroute' | 'maintenance' | 'child' | 'broken' | 'swap' | 'delay'
 const mode = ref<Mode>('')
+const latePanelOpen = ref(false)
 
 // —— 拥堵 / 改道 ——
 const blockedHallId = ref('')
@@ -80,12 +82,14 @@ const impact = computed(() =>
 )
 
 function startCongestion() {
+  latePanelOpen.value = false
   mode.value = 'congestion'
   blockedHallId.value = r.value?.route.find((s) => s.state === 'current')?.hallId ?? ''
   targetHallId.value = ''
 }
 function startVisitorReroute() {
   if (!r.value) return
+  latePanelOpen.value = false
   mode.value = 'reroute'
   blockedHallId.value = r.value?.route.find((s) => s.state === 'current')?.hallId ?? ''
   targetHallId.value = ''
@@ -244,10 +248,12 @@ const loadInputs = ref<Record<string, number>>({})
           <button class="btn-sm" @click="r.route.some((s) => s.state === 'current') && store.advanceStop(selectedId, session.staffName)">✓ 当前展厅讲解完成，进入下一站</button>
           <button class="btn-sm" style="border-color:var(--amber); color:var(--amber)" @click="startCongestion">🚧 展厅拥堵分流</button>
           <button class="btn-sm" @click="startVisitorReroute">🧭 游客要求改路线</button>
-          <button class="btn-sm" style="border-color:var(--blue); color:var(--blue)" @click="mode = 'delay'">⏱ 团体迟到 / 等待顺延</button>
-          <button class="btn-sm" style="border-color:var(--purple); color:var(--purple)" @click="mode = 'child'">🧒 儿童走散</button>
-          <button class="btn-sm btn-danger" @click="mode = 'broken'">🎧 耳麦损坏换机</button>
-          <button class="btn-sm" style="border-color:var(--green); color:var(--green)" @click="mode = 'swap'">🔄 讲解员临时替换</button>
+          <button class="btn-sm" style="border-color:var(--blue); color:var(--blue)"
+                  @click="mode = ''; latePanelOpen = !latePanelOpen">⏱ 团体迟到路线重排</button>
+          <button class="btn-sm" @click="latePanelOpen = false; mode = 'delay'">⏳ 现场等待顺延</button>
+          <button class="btn-sm" style="border-color:var(--purple); color:var(--purple)" @click="latePanelOpen = false; mode = 'child'">🧒 儿童走散</button>
+          <button class="btn-sm btn-danger" @click="latePanelOpen = false; mode = 'broken'">🎧 耳麦损坏换机</button>
+          <button class="btn-sm" style="border-color:var(--green); color:var(--green)" @click="latePanelOpen = false; mode = 'swap'">🔄 讲解员临时替换</button>
         </div>
 
         <!-- 拥堵/改道面板 -->
@@ -301,10 +307,12 @@ const loadInputs = ref<Record<string, number>>({})
           </div>
         </div>
 
-        <!-- 迟到 -->
-        <div v-if="mode === 'delay'" class="grid" style="grid-template-columns:160px 1fr auto; gap:10px; align-items:end; margin-top:12px">
+        <!-- 团体迟到路线重排：缩短 / 自助 / 改签 -->
+        <LatePlanPanel v-if="latePanelOpen" v-model:open="latePanelOpen" :res-id="selectedId" />
+
+        <!-- 现场等待顺延（集合/如厕等，不含迟到重排） -->
+        <div v-if="mode === 'delay'" class="grid" style="grid-template-columns:160px 1fr; gap:10px; align-items:end; margin-top:12px">
           <div class="field" style="margin:0"><label>顺延分钟数</label><input v-model.number="delayMin" type="number" min="5" step="5" /></div>
-          <button class="btn-sm" style="border-color:var(--blue); color:var(--blue)" @click="applyDelay('late')">按团体迟到登记并顺延</button>
           <button class="btn-sm" @click="applyDelay('wait')">按现场等待登记并顺延</button>
         </div>
 
