@@ -67,10 +67,14 @@ export type EventKind =
   | 'device_exchange'
   | 'guide_assign'
   | 'guide_swap'
+  | 'guide_release'
   | 'batch_admit'
   | 'start_tour'
   | 'hall_congestion'
   | 'late'
+  | 'late_replan'
+  | 'self_guide'
+  | 'reschedule'
   | 'child_lost'
   | 'device_broken'
   | 'reroute'
@@ -152,6 +156,12 @@ export interface Reservation {
   devices: DeviceUnit[]
   depositTotal: number
   depositDeduction: number
+  headsetDueHM?: string // 耳麦应还时间（HH:mm），迟到重排后自动调整
+
+  // —— 迟到重排 / 自助参观 ——
+  lateReplan?: LatePlanRecord
+  selfGuided?: boolean
+  selfGuideInfo?: SelfGuideInfo
 
   // —— 离馆 ——
   departAt?: string
@@ -218,4 +228,41 @@ export interface SecurityLane {
   name: string
   perSlot: number // 每 15 分钟可检人数
   accessibleOnly?: boolean
+}
+
+/** 迟到重排方案类型 */
+export type LatePlanKind = 'shorten' | 'self' | 'reschedule'
+
+export const LATE_PLAN_LABEL: Record<LatePlanKind, string> = {
+  shorten: '缩短路线',
+  self: '自助参观',
+  reschedule: '改签时段',
+}
+
+/** 迟到重排决策留痕：投诉「内容减少」时的压缩依据 */
+export interface LatePlanRecord {
+  kind: LatePlanKind
+  lateMin: number // 迟到分钟数
+  decidedAt: string // ISO 决策时间
+  decidedBy: string // 经办人（馆方）
+  confirmedBy: string // 电话/现场确认的联系人
+  remainMin: number // 决策时剩余可用讲解时长
+  guideConstraint: string // 讲解员后续任务约束描述
+  nextArrivalNote: string // 下一团到馆情况
+  congestionNote: string // 决策时展厅拥堵情况
+  reasons: string[] // 逐条压缩/改派依据
+  droppedHalls: { hallId: string; reason: string }[] // 被压缩掉的展厅及原因
+  beforeEndHM: string // 原计划结束时刻
+  afterEndHM: string // 调整后结束时刻
+}
+
+/** 自助参观推送信息 */
+export interface SelfGuideInfo {
+  meetingPoint: string // 集合点
+  meetingHM: string // 集合时间
+  releasedGuideNames: string[] // 被释放的讲解员
+  releasedWindow: string // 释放出的时段 "HH:mm-HH:mm"
+  points: { hallId: string; highlights: string[] }[] // 电子导览各厅要点
+  assignableNotes: string[] // 释放时段可分配给哪些后续等待团队
+  pushedAt: string // ISO 推送时间
 }

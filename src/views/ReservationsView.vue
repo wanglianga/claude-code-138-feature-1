@@ -65,6 +65,8 @@ const FILTERS: (ReservationStatus | 'all')[] = [
           <tr class="clickable" @click="expanded = expanded === r.id ? null : r.id">
             <td>
               <strong>{{ r.orgName }}</strong>
+              <span v-if="r.selfGuided" class="tag tag-ok" style="margin-left:4px">自助参观</span>
+              <span v-else-if="r.lateReplan" class="tag tag-warn" style="margin-left:4px">迟到重排</span>
               <div class="muted small mono">{{ r.id }}</div>
             </td>
             <td class="small">
@@ -98,7 +100,7 @@ const FILTERS: (ReservationStatus | 'all')[] = [
                   <dl class="kv">
                     <dt>联系人</dt><dd>{{ r.contactName }} {{ r.contactPhone }}</dd>
                     <dt>车辆</dt><dd>{{ r.busInfo }}</dd>
-                    <dt>耳麦</dt><dd>{{ r.needHeadsets ? `借用 ${r.headsetCount} 台，押金 ¥${r.depositTotal.toLocaleString()}` : '不借用' }}</dd>
+                    <dt>耳麦</dt><dd>{{ r.needHeadsets ? `借用 ${r.headsetCount} 台，押金 ¥${r.depositTotal.toLocaleString()}` : '不借用' }}{{ r.headsetDueHM ? `，应还 ${r.headsetDueHM}` : '' }}</dd>
                     <dt>讲解时长</dt><dd>{{ r.durationMin }} 分钟</dd>
                     <dt v-if="r.confirmNote">确认备注</dt><dd v-if="r.confirmNote">{{ r.confirmNote }}</dd>
                     <dt v-if="r.complaint">投诉</dt><dd v-if="r.complaint" style="color:var(--red)">{{ r.complaint }}</dd>

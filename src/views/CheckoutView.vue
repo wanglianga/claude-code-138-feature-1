@@ -87,7 +87,11 @@ function finish() {
         </div>
 
         <div class="grid grid-4">
-          <div><div class="stat-label">应还耳麦</div><div class="stat-num">{{ r.devices.length }}</div></div>
+          <div>
+            <div class="stat-label">应还耳麦</div>
+            <div class="stat-num">{{ r.devices.length }}</div>
+            <div v-if="r.headsetDueHM" class="small muted">应于 <strong class="mono">{{ r.headsetDueHM }}</strong> 前归还</div>
+          </div>
           <div><div class="stat-label">完好</div><div class="stat-num" style="color:var(--green)">{{ stats.ok }}</div></div>
           <div><div class="stat-label">损坏 / 遗失</div><div class="stat-num" style="color:var(--red)">{{ stats.damaged }} / {{ stats.lost }}</div></div>
           <div><div class="stat-label">应扣赔偿</div><div class="stat-num money">¥{{ stats.deduction }}</div></div>

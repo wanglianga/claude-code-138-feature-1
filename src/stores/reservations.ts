@@ -1,11 +1,12 @@
 import { defineStore } from 'pinia'
-import { DAMAGE_FEE, LOST_FEE } from '@/data/museum'
+import { DAMAGE_FEE, LOST_FEE, TODAY } from '@/data/museum'
 import { seedReservations } from '@/data/seed'
 import {
   buildRoute,
   plannedDuration,
 } from '@/lib/schedule'
-import { addHM, hmOfISO, toMin, uid } from '@/lib/time'
+import type { LateContext, ReschedulePlan, SelfGuidePlan, ShortenPlan } from '@/lib/latePlan'
+import { addHM, hmOfISO, toHM, toMin, uid } from '@/lib/time'
 import { useMuseumStore } from './museum'
 import type {
   AgeBand,
@@ -13,6 +14,7 @@ import type {
   GroupType,
   HallClosure,
   Language,
+  LatePlanRecord,
   Reservation,
   ReservationStatus,
   RouteStop,
@@ -182,10 +184,13 @@ export const useReservationsStore = defineStore('reservations', {
       const picked = museum.lendFromPool(count, r.id, at)
       r.devices = picked
       r.depositTotal = picked.length * museum.depositPerUnit
+      // 耳麦应还时间 = 路线末站结束后 15 分钟（迟到重排会自动调整）
+      const active = r.route.filter((s) => s.state !== 'skipped' && s.state !== 'maintenance')
+      if (active.length) r.headsetDueHM = addHM(active[active.length - 1].plannedLeave, 15)
       const codes = picked.length ? `${picked[0].code} ~ ${picked[picked.length - 1].code}` : ''
       this.log(r, 'device_handout', `发放耳麦 ${picked.length} 台（${codes}）`, at, by, {
         amount: r.depositTotal,
-        detail: `押金 ¥${r.depositTotal.toLocaleString()} 已收取${picked.length < count ? '，库存不足部分未发' : ''}`,
+        detail: `押金 ¥${r.depositTotal.toLocaleString()} 已收取${picked.length < count ? '，库存不足部分未发' : ''}${r.headsetDueHM ? `；应于 ${r.headsetDueHM} 前归还` : ''}`,
       })
     },
 
@@ -201,7 +206,13 @@ export const useReservationsStore = defineStore('reservations', {
         first.actualEnter = now
       }
       this.log(r, 'batch_admit', `${r.batchNo ?? ''} 批次安检入馆`, museum.nowISO, by)
-      this.log(r, 'start_tour', `${museum.themeById(r.themeId)?.name ?? ''}开始讲解`, museum.nowISO, museum.guideById(r.assignedGuideIds[0])?.name ?? by)
+      this.log(
+        r,
+        'start_tour',
+        r.selfGuided ? '自助参观开始（电子导览已推送联系人）' : `${museum.themeById(r.themeId)?.name ?? ''}开始讲解`,
+        museum.nowISO,
+        r.selfGuided ? by : (museum.guideById(r.assignedGuideIds[0])?.name ?? by),
+      )
     },
 
     // ---------- 途中调度 ----------
@@ -376,6 +387,173 @@ export const useReservationsStore = defineStore('reservations', {
       this.log(r, 'device_exchange', `耳麦 ${oldCode} 损坏${newCode ? `，补发 ${newCode}` : '（库存不足，未补发）'}`, museum.nowISO, by, {
         detail: `${note}；赔偿待离馆押金结算。`,
       })
+    },
+
+    // ---------- 迟到路线重排 ----------
+    /** 组装迟到重排留痕（投诉「内容减少」时的压缩依据） */
+    buildLateRecord(
+      r: Reservation,
+      kind: LatePlanRecord['kind'],
+      ctx: LateContext,
+      congestion: string,
+      afterEndHM: string,
+      dropped: { hallId: string; reason: string }[],
+      reasons: string[],
+      by: string,
+    ): LatePlanRecord {
+      const museum = useMuseumStore()
+      const active = r.route.filter((s) => s.state !== 'skipped' && s.state !== 'maintenance')
+      return {
+        kind,
+        lateMin: ctx.lateMin,
+        decidedAt: museum.nowISO,
+        decidedBy: by,
+        confirmedBy: r.contactName,
+        remainMin: ctx.remainMin,
+        guideConstraint: ctx.guideConstraint,
+        nextArrivalNote: ctx.nextArrivals.length
+          ? ctx.nextArrivals.map((n) => `「${n.orgName}」${n.arriveHM} 到馆`).join('、')
+          : '当日后续无其他团队到馆',
+        congestionNote: congestion,
+        reasons,
+        droppedHalls: dropped,
+        beforeEndHM: active.length ? active[active.length - 1].plannedLeave : '—',
+        afterEndHM,
+      }
+    },
+
+    /** 方案一：缩短路线 —— 压缩停留/舍弃低分展厅，讲解员排班与耳麦应还时间自动调整 */
+    applyLateShorten(id: string, plan: ShortenPlan, ctx: LateContext, congestion: string, by: string) {
+      const r = this.byId(id)
+      const museum = useMuseumStore()
+      if (!r || r.lateReplan) return
+      r.lateReplan = this.buildLateRecord(r, 'shorten', ctx, congestion, plan.endHM, plan.dropped, plan.reasons, by)
+      // 保留站：写入压缩后的时间；舍弃站：标记跳过
+      for (const ns of plan.stops) {
+        const s = r.route.find((x) => x.hallId === ns.hallId && x.state === 'planned' && !x.actualEnter)
+        if (s) Object.assign(s, ns)
+      }
+      for (const d of plan.dropped) {
+        const s = r.route.find((x) => x.hallId === d.hallId && x.state === 'planned' && !x.actualEnter)
+        if (s) {
+          s.state = 'skipped'
+          s.note = `迟到压缩舍弃：${d.reason}`
+        }
+      }
+      this.refreshDuration(r)
+      r.headsetDueHM = addHM(plan.endHM, 15)
+      this.log(
+        r,
+        'late_replan',
+        `迟到 ${ctx.lateMin} 分钟路线重排：缩短为 ${plan.stops.length} 站，${plan.endHM} 结束`,
+        museum.nowISO,
+        by,
+        {
+          detail: `${plan.reasons.join('；')}。联系人 ${r.contactName} 已电话确认。耳麦应还时间自动调整为 ${r.headsetDueHM}。`,
+        },
+      )
+      const names = r.assignedGuideIds.map((g) => museum.guideById(g)?.name).join('、')
+      this.log(
+        r,
+        'guide_assign',
+        `讲解员排班自动调整：${names} 带团窗口缩短为 ${ctx.enterHM}-${plan.endHM}`,
+        museum.nowISO,
+        '系统',
+        { detail: `${ctx.guideConstraint}；压缩后时段已同步至排班热力图。` },
+      )
+    },
+
+    /** 方案二：自助参观 —— 推送电子导览与集合点，释放讲解员时段给后续等待团队 */
+    applyLateSelf(id: string, plan: SelfGuidePlan, ctx: LateContext, congestion: string, by: string) {
+      const r = this.byId(id)
+      const museum = useMuseumStore()
+      if (!r || r.lateReplan) return
+      r.lateReplan = this.buildLateRecord(r, 'self', ctx, congestion, plan.meetingHM, [], plan.reasons, by)
+      for (const ns of plan.stops) {
+        const s = r.route.find((x) => x.hallId === ns.hallId && x.state === 'planned' && !x.actualEnter)
+        if (s) Object.assign(s, ns)
+      }
+      this.refreshDuration(r)
+      const releasedNames = r.assignedGuideIds
+        .map((g) => museum.guideById(g)?.name ?? g)
+      r.selfGuided = true
+      r.selfGuideInfo = {
+        meetingPoint: plan.meetingPoint,
+        meetingHM: plan.meetingHM,
+        releasedGuideNames: releasedNames,
+        releasedWindow: plan.releasedWindow,
+        points: plan.points,
+        assignableNotes: plan.assignable.map((a) => a.note),
+        pushedAt: museum.nowISO,
+      }
+      r.assignedGuideIds = []
+      r.headsetDueHM = addHM(plan.meetingHM, 15)
+      this.log(
+        r,
+        'late_replan',
+        `迟到 ${ctx.lateMin} 分钟路线重排：改为自助参观，${plan.meetingHM} 集合`,
+        museum.nowISO,
+        by,
+        { detail: `${plan.reasons.join('；')}。联系人 ${r.contactName} 已电话确认。耳麦应还时间自动调整为 ${r.headsetDueHM}。` },
+      )
+      this.log(
+        r,
+        'self_guide',
+        `已向联系人推送电子导览（${plan.points.length} 个展厅要点）与集合点`,
+        museum.nowISO,
+        '系统',
+        { detail: `集合时间 ${plan.meetingHM}，集合点：${plan.meetingPoint}。` },
+      )
+      this.log(
+        r,
+        'guide_release',
+        `讲解员释放：${releasedNames.join('、')} 空出 ${plan.releasedWindow} 时段`,
+        museum.nowISO,
+        '系统',
+        {
+          detail: plan.assignable.length
+            ? `可分配给后续等待团队：${plan.assignable.map((a) => a.note).join('；')}`
+            : '当前时段无可接续的等待团队。',
+        },
+      )
+    },
+
+    /** 方案三：改签时段 —— 路线整体改到当日稍后，讲解员与耳麦应还时间自动调整 */
+    applyLateReschedule(id: string, plan: ReschedulePlan, ctx: LateContext, congestion: string, by: string) {
+      const r = this.byId(id)
+      const museum = useMuseumStore()
+      if (!r || r.lateReplan) return
+      r.lateReplan = this.buildLateRecord(r, 'reschedule', ctx, congestion, plan.endHM, [], plan.reasons, by)
+      // 路线整体改签到新时段
+      let cursor = toMin(plan.slotHM)
+      for (const s of r.route) {
+        if (s.state !== 'planned' || s.actualEnter) continue
+        s.plannedEnter = toHM(cursor)
+        s.plannedLeave = addHM(s.plannedEnter, s.durationMin)
+        s.note = `改签至 ${plan.slotHM} 时段`
+        cursor = toMin(s.plannedLeave) + 5
+      }
+      const oldArrive = hmOfISO(r.arriveTime)
+      r.arriveTime = `${TODAY}T${addHM(plan.slotHM, -10)}:00`
+      r.assignedGuideIds = [plan.guideId]
+      this.refreshDuration(r)
+      r.headsetDueHM = addHM(plan.endHM, 15)
+      this.log(
+        r,
+        'late_replan',
+        `迟到 ${ctx.lateMin} 分钟路线重排：改签至 ${plan.slotHM} 时段`,
+        museum.nowISO,
+        by,
+        { detail: `${plan.reasons.join('；')}。联系人 ${r.contactName} 已电话确认。耳麦应还时间自动调整为 ${r.headsetDueHM}。` },
+      )
+      this.log(
+        r,
+        'reschedule',
+        `预约时段 ${oldArrive} → ${hmOfISO(r.arriveTime)}，讲解员 ${plan.guideName}${plan.sameGuide ? '（原讲解员顺延）' : '（改派）'}`,
+        museum.nowISO,
+        '系统',
+        { detail: '安检批次与容量栅格已按新时段重算，团队可先离馆休息再返回。' },
+      )
     },
 
     // ---------- 离馆 ----------

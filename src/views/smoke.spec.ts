@@ -11,6 +11,11 @@ import DispatchView from '@/views/DispatchView.vue'
 import CheckoutView from '@/views/CheckoutView.vue'
 import TraceView from '@/views/TraceView.vue'
 import OpsView from '@/views/OpsView.vue'
+import { useMuseumStore } from '@/stores/museum'
+import { useReservationsStore } from '@/stores/reservations'
+import { occupancyGrid } from '@/lib/schedule'
+import { analyzeLate, buildShortenPlan } from '@/lib/latePlan'
+import { HALLS } from '@/data/museum'
 
 function makeRouter() {
   return createRouter({
@@ -76,6 +81,30 @@ describe('八大业务视图挂载冒烟', () => {
     expect(w.text()).toContain('批次安检入馆')
   })
 
+  it('到馆前台：迟到 40 分钟触发路线重排，确认自助参观后推送电子导览', async () => {
+    const w = mountView(FrontDeskView)
+    // 队列首个为育英中学（预约 09:45，馆内时钟 10:25）
+    expect(w.text()).toContain('育英中学')
+    const arriveBtn = w.findAll('button').find((b) => b.text().includes('登记到馆'))!
+    await arriveBtn.trigger('click')
+    // 迟到 40 分钟 → 三方案面板
+    expect(w.text()).toContain('迟到路线重排建议')
+    expect(w.text()).toContain('剩余可讲解时长')
+    expect(w.text()).toContain('远瞻科技') // 讲解员后续任务
+    expect(w.text()).toContain('缩短路线')
+    expect(w.text()).toContain('自助参观')
+    expect(w.text()).toContain('改签时段')
+    // 选择自助参观 → 联系人确认
+    await w.find('[data-plan="self"]').trigger('click')
+    const confirmBtn = w.findAll('button').find((b) => b.text().includes('联系人确认采用'))!
+    await confirmBtn.trigger('click')
+    // 电子导览 + 集合点 + 讲解员释放时段再分配
+    expect(w.text()).toContain('已按「自助参观」重排')
+    expect(w.text()).toContain('已推送电子导览')
+    expect(w.text()).toContain('中庭')
+    expect(w.text()).toContain('云川中学')
+  })
+
   it('途中调度页展示七类事件入口与实时态势', () => {
     const w = mountView(DispatchView)
     expect(w.text()).toContain('展厅实时态势')
@@ -99,5 +128,32 @@ describe('八大业务视图挂载冒烟', () => {
     expect(w.text()).toContain('晨光职业学校')
     expect(w.text()).toContain('讲解缩水')
     expect(w.text()).toContain('完整操作时间线')
+  })
+
+  it('追溯页：投诉内容减少时展示迟到压缩依据', () => {
+    // 育英中学迟到 40 分钟 → 缩短路线 → 离馆后投诉内容减少
+    const museum = useMuseumStore()
+    const store = useReservationsStore()
+    museum.setNow('10:25')
+    store.markArrived('R20261001-06')
+    const r = store.byId('R20261001-06')!
+    const ctx = analyzeLate(r, store.list, museum.guides, museum.nowHM)
+    const grid = occupancyGrid(
+      store.list.filter((x) => x.id !== r.id),
+      { maintenance: museum.maintenance, extraLoad: museum.extraLoad },
+    )
+    const plan = buildShortenPlan(r, ctx, HALLS, grid, {
+      maintenance: museum.maintenance,
+      extraLoad: museum.extraLoad,
+    })
+    store.applyLateShorten(r.id, plan, ctx, '近现代名家 28/45，叠加本团将超容量', '沈姐')
+    store.addComplaint(r.id, '讲解内容比预约少了一个展厅，要求说明。', r.contactName)
+
+    const w = mountView(TraceView)
+    expect(w.text()).toContain('迟到压缩依据')
+    expect(w.text()).toContain('迟到 40')
+    expect(w.text()).toContain('被压缩展厅及原因')
+    expect(w.text()).toContain('为避免超载舍弃')
+    expect(w.text()).toContain('远瞻科技') // 讲解员后续任务约束
   })
 })

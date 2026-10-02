@@ -5,6 +5,7 @@ import { useMuseumStore } from '@/stores/museum'
 import { useReservationsStore } from '@/stores/reservations'
 import { useSessionStore } from '@/stores/session'
 import { hmOfISO, toMin } from '@/lib/time'
+import { LATE_PLAN_LABEL } from '@/types'
 import StatusBadge from '@/components/StatusBadge.vue'
 import RouteChain from '@/components/RouteChain.vue'
 import TimelineView from '@/components/TimelineView.vue'
@@ -133,6 +134,55 @@ const deviceRows = computed(() => r.value?.devices ?? [])
           <div class="stat-label">满意度</div>
           <div class="stars" style="font-size:22px">{{ r.satisfaction ? '★'.repeat(r.satisfaction) + '☆'.repeat(5 - r.satisfaction) : '—' }}</div>
           <div class="small muted">{{ r.departAt ? `离馆 ${hmOfISO(r.departAt)}` : '' }}</div>
+        </div>
+      </div>
+
+      <!-- 迟到压缩依据：投诉「讲解内容减少」时直接回放决策现场 -->
+      <div v-if="r.lateReplan" class="card" :style="r.complaint ? 'border-color:var(--red)' : ''">
+        <div class="card-title">
+          ⏰ 迟到压缩依据
+          <span class="aside">
+            {{ r.lateReplan.decidedAt.slice(11, 16) }} 决策 · 经办 {{ r.lateReplan.decidedBy }} · 联系人 {{ r.lateReplan.confirmedBy }} 已确认
+          </span>
+        </div>
+        <div v-if="r.complaint" class="callout danger" style="margin-bottom:12px">
+          团体投诉内容减少 —— 以下为迟到 {{ r.lateReplan.lateMin }} 分钟导致压缩的完整依据，可直接用于答复。
+        </div>
+        <div class="grid grid-4" style="margin-bottom:10px">
+          <div><div class="stat-label">迟到</div><div class="stat-num" style="color:var(--red)">{{ r.lateReplan.lateMin }}<span style="font-size:14px"> 分钟</span></div></div>
+          <div><div class="stat-label">决策时剩余可讲解</div><div class="stat-num">{{ r.lateReplan.remainMin }}<span style="font-size:14px"> 分钟</span></div></div>
+          <div><div class="stat-label">处置方案</div><div class="stat-num" style="font-size:21px">{{ LATE_PLAN_LABEL[r.lateReplan.kind] }}</div></div>
+          <div>
+            <div class="stat-label">计划结束 原 → 新</div>
+            <div class="stat-num mono" style="font-size:21px">{{ r.lateReplan.beforeEndHM }} → {{ r.lateReplan.afterEndHM }}</div>
+          </div>
+        </div>
+        <dl class="kv">
+          <dt>讲解员约束</dt><dd>{{ r.lateReplan.guideConstraint }}</dd>
+          <dt>下一团到馆</dt><dd>{{ r.lateReplan.nextArrivalNote }}</dd>
+          <dt>决策时拥堵</dt><dd>{{ r.lateReplan.congestionNote }}</dd>
+        </dl>
+        <div style="margin-top:10px">
+          <div class="small muted" style="margin-bottom:4px">压缩 / 改派依据（逐条）</div>
+          <div v-for="(x, i) in r.lateReplan.reasons" :key="i" class="small" style="margin-bottom:2px">· {{ x }}</div>
+        </div>
+        <template v-if="r.lateReplan.droppedHalls.length">
+          <div class="small muted" style="margin:10px 0 4px">被压缩展厅及原因</div>
+          <table class="data">
+            <thead><tr><th>展厅</th><th>压缩原因</th></tr></thead>
+            <tbody>
+              <tr v-for="d in r.lateReplan.droppedHalls" :key="d.hallId">
+                <td class="small"><strong>{{ museum.hallById(d.hallId)?.name }}</strong></td>
+                <td class="small">{{ d.reason }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </template>
+        <div v-if="r.selfGuideInfo" class="callout info" style="margin:10px 0 0">
+          <strong>自助参观已推送：</strong>电子导览 {{ r.selfGuideInfo.points.length }} 个展厅要点 ·
+          集合 {{ r.selfGuideInfo.meetingHM }} {{ r.selfGuideInfo.meetingPoint }} ·
+          讲解员 {{ r.selfGuideInfo.releasedGuideNames.join('、') }} 释放 {{ r.selfGuideInfo.releasedWindow }} 时段
+          <template v-if="r.selfGuideInfo.assignableNotes.length">（{{ r.selfGuideInfo.assignableNotes.join('；') }}）</template>
         </div>
       </div>
 
